@@ -33,6 +33,10 @@ def register_images(fixed_image, moving_image):
     np.ndarray: The registered moving image and the transformation used.
     """
     # Ensure both images are 2D and of the same type
+    fixed_image, moving_image = center_images(fixed_image, moving_image)
+    assert np.sum(fixed_image) != 0, "Fixed image is empty."
+    assert np.sum(moving_image) != 0, "Moving image is empty."
+
     fixed_image_sitk = sitk.GetImageFromArray(fixed_image.astype(np.float32))
     moving_image_sitk = sitk.GetImageFromArray(moving_image.astype(np.float32))
 
@@ -149,7 +153,81 @@ def extract_rois(image, mask):
     return rois
 
 
-def process_images(coil_images, sense_image, ce, timepoint, threshold=150):
+def window_image(image, window=None):
+    if window is not None:
+        # Ensure window does not exceed image dimensions
+        window = min(window, image.shape[0])
+        windowed_image = image[:window, ...]
+    else:
+        windowed_image = image
+
+    return windowed_image
+
+
+def get_subtraction_image(image, timepoint, n_subtract=None):
+    if n_subtract is not None and (timepoint - n_subtract >= 0):
+        current_image = image[..., timepoint]
+        past_image = image[..., timepoint - n_subtract]
+        return current_image - past_image
+    return image[..., timepoint]
+
+
+def center_images(fixed_image, moving_image):
+    """
+    Align the centers of the fixed and moving images by translating the moving image's center to match the fixed image's center,
+    handling different image sizes.
+
+    Parameters:
+    fixed_image (np.ndarray): The fixed image (e.g., SENSE image).
+    moving_image (np.ndarray): The moving image to be aligned (e.g., CE image).
+
+    Returns:
+    np.ndarray, np.ndarray: The fixed image and the centered moving image.
+    """
+    # Convert numpy arrays to SimpleITK images
+    fixed_image_sitk = sitk.GetImageFromArray(fixed_image.astype(np.float32))
+    moving_image_sitk = sitk.GetImageFromArray(moving_image.astype(np.float32))
+
+    # Ensure the moving image has the same spacing and size as the fixed image
+    moving_image_sitk.SetSpacing(fixed_image_sitk.GetSpacing())
+    moving_image_sitk.SetOrigin(fixed_image_sitk.GetOrigin())
+
+    # Calculate centers of images in index space
+    fixed_size = np.array(fixed_image_sitk.GetSize(), dtype=np.float32)
+    moving_size = np.array(moving_image_sitk.GetSize(), dtype=np.float32)
+    fixed_center = fixed_size / 2.0
+    moving_center = moving_size / 2.0
+
+    # Calculate translation needed to align centers
+    translation = fixed_center - moving_center
+
+    # Create translation transform
+    transform = sitk.TranslationTransform(fixed_image_sitk.GetDimension())
+    transform.SetOffset(translation)
+
+    # Resample moving image to align it with the fixed image
+    resampler = sitk.ResampleImageFilter()
+    resampler.SetReferenceImage(fixed_image_sitk)
+    resampler.SetInterpolator(sitk.sitkLinear)
+    resampler.SetTransform(transform)
+    resampler.SetSize(
+        fixed_image_sitk.GetSize()
+    )  # Ensure the output image has the same size as the fixed image
+    centered_moving_image_sitk = resampler.Execute(moving_image_sitk)
+
+    return fixed_image, sitk.GetArrayFromImage(centered_moving_image_sitk)
+
+
+def process_images(
+    coil_images,
+    sense_image,
+    ce,
+    timepoint,
+    threshold=150,
+    coil_window=None,
+    recon_window=None,
+    n_subtract=None,
+):
     """
     Complete pipeline to process images, perform registration, feature detection, ROI extraction, and SNR calculation.
 
@@ -163,31 +241,43 @@ def process_images(coil_images, sense_image, ce, timepoint, threshold=150):
     Returns:
     None
     """
-    coil_img = coil_images[:, :, :, ce, timepoint].numpy()
-    sense_img = sense_image[:, :, :, timepoint].numpy()
+    coil_images = window_image(coil_images, coil_window)
+    sense_image = window_image(sense_image, recon_window)
 
-    # Flip SENSE image across the X axis
-    sense_img = np.flip(sense_img, axis=0)
+    coil_images = np.abs(coil_images)
+    sense_image = np.abs(sense_image)
 
-    # Normalize images
-    coil_img = normalize_image(coil_img)
-    sense_img = normalize_image(sense_img)
+    coil_images = get_subtraction_image(coil_images, timepoint, n_subtract)
+    sense_image = get_subtraction_image(sense_image, timepoint, n_subtract)
 
-    coil_img_mip = max_intensity_projection(coil_img)
-    sense_img_mip = max_intensity_projection(sense_img)
+    coil_images = coil_images[:, :, :, ce].numpy()
+    sense_image = sense_image.numpy()
 
-    registered_image, transform = register_images(sense_img_mip, coil_img_mip)
+    coil_images = max_intensity_projection(coil_images)
+    sense_image = max_intensity_projection(sense_image)
+
+    coil_images = normalize_image(coil_images)
+    sense_image = normalize_image(sense_image)
+
+    registered_image, transform = register_images(sense_image, coil_images)
 
     # Detect and extract ROIs in the registered image
     enhancing_features = detect_enhancing_features(registered_image, threshold)
     rois = extract_rois(registered_image, enhancing_features)
 
     # Apply the same transformation to the CE image to get corresponding ROIs
-    ce_transformed_image = apply_transform(coil_img_mip, transform)
+    ce_transformed_image = apply_transform(coil_images, transform)
 
     # Plot ROIs in both SENSE and CE images
+    # plot_rois(
+    #     sense_image,
+    #     coil_images,
+    #     [],
+    #     [],
+    #     "Registered ROIs in SENSE and CE Images",
+    # )
     plot_rois(
-        sense_img_mip,
+        sense_image,
         ce_transformed_image,
         rois,
         rois,
@@ -196,7 +286,7 @@ def process_images(coil_images, sense_image, ce, timepoint, threshold=150):
 
     # Flatten and calculate SNR for corresponding ROIs
     sense_roi_values = [
-        sense_img_mip[y : y + h, x : x + w].flatten() for x, y, w, h in rois
+        sense_image[y : y + h, x : x + w].flatten() for x, y, w, h in rois
     ]
     ce_roi_values = [
         ce_transformed_image[y : y + h, x : x + w].flatten() for x, y, w, h in rois
@@ -212,12 +302,8 @@ def process_images(coil_images, sense_image, ce, timepoint, threshold=150):
     print(f"SNR for SENSE image: {sense_snr}")
     print(f"SNR for CE image: {ce_snr}")
 
-    plot_histograms(
-        sense_signal_roi_tensor, noise_roi_tensor, "Histogram for SENSE Image ROIs"
-    )
-    plot_histograms(
-        ce_signal_roi_tensor, noise_roi_tensor, "Histogram for CE Image ROIs"
-    )
+    plot_histograms(sense_signal_roi_tensor, noise_roi_tensor, "SENSE image ROIs")
+    plot_histograms(ce_signal_roi_tensor, noise_roi_tensor, "CE image ROIs")
 
 
 def calculate_snr(signal_roi, noise_roi):

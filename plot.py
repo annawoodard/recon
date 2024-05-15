@@ -5,6 +5,8 @@ import torch.fft
 import ipywidgets as widgets
 from IPython.display import display, clear_output
 import matplotlib.patches as patches
+import numpy as np
+from snr import get_subtraction_image, normalize_image
 
 
 def normalize_image(image, window=None):
@@ -61,7 +63,7 @@ def get_windowed_bounds(image, lower_p, upper_p, window_height):
 
 
 def plot_coil_images(
-    img_space,
+    coil_images,
     time_idx,
     tr,
     n_subtract=None,
@@ -73,31 +75,27 @@ def plot_coil_images(
     """
     Plot coil images from k-space MRI data.
     Args:
-        img_space (torch.Tensor): The input image space data of shape (x, y, z, coils, time).
+        coil_images (torch.Tensor): The input image space data of shape (x, y, z, coils, time).
         time_idx (int): The time index to visualize.
         tr (float): The repetition time (TR) in seconds.
         n_subtract (int, optional): The number of time points to subtract for the subtraction image.
         window (int): The point to cut images to get rid of thorax/heart signal.
     """
-    nx, ny, nz, num_coils, nt = img_space.shape
-    magnitude = torch.abs(img_space)
+    nx, ny, nz, num_coils, nt = coil_images.shape
+    coil_images = torch.abs(coil_images)
 
-    if n_subtract is not None and (time_idx - n_subtract >= 0):
-        curr_images = magnitude[:, :, :, :, time_idx]
-        past_images = magnitude[:, :, :, :, time_idx - n_subtract]
-        subtracted_images = curr_images - past_images
-    else:
-        subtracted_images = magnitude[:, :, :, :, time_idx]
+    coil_images = normalize_image(coil_images)
+    coil_images = get_subtraction_image(coil_images, time_idx, n_subtract)
 
-    mip_magnitude = torch.max(subtracted_images, dim=2).values
+    mip = torch.max(coil_images, dim=2).values
     fig, axs = plt.subplots(1, num_coils, figsize=(25, 10))
     for i in range(num_coils):
         vmin, vmax = get_windowed_bounds(
-            mip_magnitude[:, :, i], lower_percentile, upper_percentile, window
+            mip[:, :, i], lower_percentile, upper_percentile, window
         )
 
         axs[i].imshow(
-            mip_magnitude[:, :, i].numpy(),
+            mip[:, :, i].numpy(),
             cmap="gray",
             vmin=vmin,
             vmax=vmax,
@@ -110,7 +108,7 @@ def plot_coil_images(
             axs[i].add_patch(
                 patches.Rectangle(
                     (0, 0),
-                    mip_magnitude.shape[1],
+                    mip.shape[1],
                     window,
                     linewidth=1,
                     edgecolor="r",
@@ -261,7 +259,7 @@ def interactive_plot(plot_fn, data, tr, start_value=0, **kwargs):
     """
     Create an interactive plot with a slider to cycle through timepoints, showing MRI coil images and Philips reconstruction in separate figures.
     Args:
-        img_space (torch.Tensor): The input image space data of shape (x, y, z, coils, time).
+        coil_images (torch.Tensor): The input image space data of shape (x, y, z, coils, time).
         phillips_recon (torch.Tensor): Philips reconstruction tensor of shape (x, y, z, time).
         tr (float): The repetition time (TR) in seconds.
         n_subtract (int, optional): The number of time points to subtract for the subtraction image.
@@ -282,11 +280,12 @@ def interactive_plot(plot_fn, data, tr, start_value=0, **kwargs):
 
 def plot_histograms(signal_roi, noise_roi, title):
     plt.figure(figsize=(10, 5))
-    plt.hist(signal_roi.numpy(), bins=30, alpha=0.7, label="signal ROI")
-    plt.hist(noise_roi.numpy(), bins=30, alpha=0.7, label="noise ROI")
+    plt.hist(signal_roi.numpy(), bins=30, alpha=0.7, label="signal")
+    plt.hist(noise_roi.numpy(), bins=30, alpha=0.7, label="noise")
     plt.title(title)
     plt.xlabel("intensity")
     plt.ylabel("frequency")
+    plt.yscale("log")
     plt.legend()
 
 
@@ -301,17 +300,23 @@ def plot_rois(sense_img, ce_img, sense_rois, ce_rois, title):
     ce_rois (list): List of ROIs in the CE image.
     title (str): Title for the plot.
     """
+    # Normalize images for display
+    sense_img_norm = (sense_img - np.min(sense_img)) / (
+        np.max(sense_img) - np.min(sense_img)
+    )
+    ce_img_norm = (ce_img - np.min(ce_img)) / (np.max(ce_img) - np.min(ce_img))
+
     fig, axes = plt.subplots(1, 2, figsize=(15, 7))
 
     # Plot SENSE image with ROIs
-    sense_img_with_rois = sense_img.copy()
+    sense_img_with_rois = (sense_img_norm * 255).astype(np.uint8)
     for x, y, w, h in sense_rois:
         cv2.rectangle(sense_img_with_rois, (x, y), (x + w, y + h), (255, 0, 0), 2)
     axes[0].imshow(sense_img_with_rois, cmap="gray")
     axes[0].set_title("SENSE Image with ROIs")
 
     # Plot CE image with ROIs
-    ce_img_with_rois = ce_img.copy()
+    ce_img_with_rois = (ce_img_norm * 255).astype(np.uint8)
     for x, y, w, h in ce_rois:
         cv2.rectangle(ce_img_with_rois, (x, y), (x + w, y + h), (255, 0, 0), 2)
     axes[1].imshow(ce_img_with_rois, cmap="gray")

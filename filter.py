@@ -1,6 +1,7 @@
 import time
 import torch
 import torch.fft
+import numpy as np
 
 
 def create_2d_gaussian_filter(nx, ny, mu_x, mu_y, sigma_x, sigma_y):
@@ -30,9 +31,9 @@ def create_2d_gaussian_filter(nx, ny, mu_x, mu_y, sigma_x, sigma_y):
             + (y_grid - mu_y) ** 2 / (2 * sigma_y**2)
         )
     )
-    gaussian_filter /= gaussian_filter.sum()  # Normalize the filter
+    gaussian_filter /= gaussian_filter.sum()  # normalize
 
-    print(f"Created 2D Gaussian filter in {time.time() - start:.0e}s")
+    print(f"created 2D Gaussian filter in {time.time() - start:.0e}s")
 
     return gaussian_filter
 
@@ -84,3 +85,54 @@ def apply_gaussian_filter(kspace, gaussian_filters):
     res = kspace * gaussian_filters  # broadcast the filter across Z, Num_Coils, Time
     print(f"applied filter in {time.time() - start:.1f}s")
     return res
+
+
+def estimate_noise_level(kspace, patch_size):
+    """
+    Estimate the local noise level in the k-space using a sliding window approach.
+    """
+    padding = patch_size // 2
+    padded_kspace = torch.zeros(
+        (
+            kspace.shape[0] + 2 * padding,
+            kspace.shape[1] + 2 * padding,
+            kspace.shape[2],
+            kspace.shape[3],
+            kspace.shape[4],
+        ),
+        dtype=kspace.dtype,
+        device=kspace.device,
+    )
+    padded_kspace[padding:-padding, padding:-padding, :, :, :] = kspace
+    padded_kspace[:padding, padding:-padding, :, :, :] = kspace[0, :, :, :, :]
+    padded_kspace[-padding:, padding:-padding, :, :, :] = kspace[-1, :, :, :, :]
+    padded_kspace[:, :padding, :, :, :] = padded_kspace[
+        :, padding : padding + 1, :, :, :
+    ]
+    padded_kspace[:, -padding:, :, :, :] = padded_kspace[
+        :, -padding - 1 : -padding, :, :, :
+    ]
+
+    noise_level = torch.zeros_like(kspace)
+
+    for i in range(padding, padding + kspace.shape[0]):
+        for j in range(padding, padding + kspace.shape[1]):
+            patch = padded_kspace[
+                i - padding : i + padding + 1, j - padding : j + padding + 1, :, :, :
+            ]
+            noise_level[i - padding, j - padding, :, :, :] = torch.std(patch)
+
+    return noise_level
+
+
+def adaptive_kspace_filter(kspace, patch_size, threshold_factor):
+    """
+    Apply adaptive k-space filtering based on local noise level estimation and thresholding.
+    """
+    noise_level = estimate_noise_level(torch.abs(kspace), patch_size)
+    threshold = threshold_factor * noise_level
+
+    filtered_kspace = kspace.clone()
+    filtered_kspace[torch.abs(kspace) < threshold] = 0
+
+    return filtered_kspace
