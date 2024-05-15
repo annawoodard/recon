@@ -3,7 +3,41 @@ import torch
 import torch.fft
 
 
-def create_gaussian_filters(nx, ny, mu_x=86, sigma_base=42, sigma_offset_index=29):
+def create_2d_gaussian_filter(nx, ny, mu_x, mu_y, sigma_x, sigma_y):
+    """
+    Create a 2D Gaussian filter.
+
+    Args:
+        nx (int): Size of the first dimension (width).
+        ny (int): Size of the second dimension (height).
+        mu_x (float): Mean of the Gaussian distribution along the x-axis.
+        mu_y (float): Mean of the Gaussian distribution along the y-axis.
+        sigma_x (float): Standard deviation of the Gaussian distribution along the x-axis.
+        sigma_y (float): Standard deviation of the Gaussian distribution along the y-axis.
+
+    Returns:
+        torch.Tensor: 2D tensor containing the Gaussian filter.
+    """
+    start = time.time()
+
+    x = torch.linspace(0, nx - 1, steps=nx)
+    y = torch.linspace(0, ny - 1, steps=ny)
+    x_grid, y_grid = torch.meshgrid(x, y, indexing="ij")
+
+    gaussian_filter = torch.exp(
+        -(
+            (x_grid - mu_x) ** 2 / (2 * sigma_x**2)
+            + (y_grid - mu_y) ** 2 / (2 * sigma_y**2)
+        )
+    )
+    gaussian_filter /= gaussian_filter.sum()  # Normalize the filter
+
+    print(f"Created 2D Gaussian filter in {time.time() - start:.0e}s")
+
+    return gaussian_filter
+
+
+def create_1d_gaussian_filter(nx, ny, mu_x=86, sigma_base=42, sigma_offset_index=29):
     """
     Create Gaussian filters for each 'Y' dimension with dynamic standard deviation.
 

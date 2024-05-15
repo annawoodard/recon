@@ -1,4 +1,5 @@
 import matplotlib.pyplot as plt
+import cv2
 import torch
 import torch.fft
 import ipywidgets as widgets
@@ -204,8 +205,8 @@ def plot_recon_comparison(
     plt.tight_layout()
 
 
-def plot_phillips_recon(
-    phillips_recon,
+def plot_recon(
+    recon,
     time_idx,
     tr,
     n_subtract=None,
@@ -216,12 +217,12 @@ def plot_phillips_recon(
     """
     Plot the Philips reconstruction for a specific time index, performing subtraction before MIP if specified.
     Args:
-        phillips_recon (torch.Tensor): The reconstruction tensor of shape (x, y, z, time).
+        recon (torch.Tensor): The reconstruction tensor of shape (x, y, z, time).
         time_idx (int): The time index to visualize.
         tr (float): The repetition time (TR) in seconds.
         n_subtract (int, optional): The number of previous time points to subtract for the subtraction image.
     """
-    magnitude = torch.abs(phillips_recon)
+    magnitude = torch.abs(recon)
 
     if n_subtract is not None and (time_idx - n_subtract >= 0):
         current_images = magnitude[:, :, :, time_idx]
@@ -277,3 +278,43 @@ def interactive_plot(plot_fn, data, tr, start_value=0, **kwargs):
     )
     interactive_control = widgets.interactive(update_plot, time_idx=time_slider)
     display(interactive_control)
+
+
+def plot_histograms(signal_roi, noise_roi, title):
+    plt.figure(figsize=(10, 5))
+    plt.hist(signal_roi.numpy(), bins=30, alpha=0.7, label="signal ROI")
+    plt.hist(noise_roi.numpy(), bins=30, alpha=0.7, label="noise ROI")
+    plt.title(title)
+    plt.xlabel("intensity")
+    plt.ylabel("frequency")
+    plt.legend()
+
+
+def plot_rois(sense_img, ce_img, sense_rois, ce_rois, title):
+    """
+    Plot the ROIs on the SENSE image and CE image side by side.
+
+    Parameters:
+    sense_img (np.ndarray): The SENSE image.
+    ce_img (np.ndarray): The CE image.
+    sense_rois (list): List of ROIs in the SENSE image.
+    ce_rois (list): List of ROIs in the CE image.
+    title (str): Title for the plot.
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(15, 7))
+
+    # Plot SENSE image with ROIs
+    sense_img_with_rois = sense_img.copy()
+    for x, y, w, h in sense_rois:
+        cv2.rectangle(sense_img_with_rois, (x, y), (x + w, y + h), (255, 0, 0), 2)
+    axes[0].imshow(sense_img_with_rois, cmap="gray")
+    axes[0].set_title("SENSE Image with ROIs")
+
+    # Plot CE image with ROIs
+    ce_img_with_rois = ce_img.copy()
+    for x, y, w, h in ce_rois:
+        cv2.rectangle(ce_img_with_rois, (x, y), (x + w, y + h), (255, 0, 0), 2)
+    axes[1].imshow(ce_img_with_rois, cmap="gray")
+    axes[1].set_title("CE Image with ROIs")
+
+    plt.suptitle(title)
