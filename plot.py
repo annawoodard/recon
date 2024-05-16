@@ -6,7 +6,6 @@ import ipywidgets as widgets
 from IPython.display import display, clear_output
 import matplotlib.patches as patches
 import numpy as np
-from snr import get_subtraction_image, normalize_image
 
 
 def normalize_image(image, window=None):
@@ -82,12 +81,11 @@ def plot_coil_images(
         window (int): The point to cut images to get rid of thorax/heart signal.
     """
     nx, ny, nz, num_coils, nt = coil_images.shape
-    coil_images = torch.abs(coil_images)
-
-    coil_images = normalize_image(coil_images)
-    coil_images = get_subtraction_image(coil_images, time_idx, n_subtract)
+    coil_images = torch.abs(coil_images[:, :, :, :, time_idx])
 
     mip = torch.max(coil_images, dim=2).values
+    mip = normalize_image(mip)
+
     fig, axs = plt.subplots(1, num_coils, figsize=(25, 10))
     for i in range(num_coils):
         vmin, vmax = get_windowed_bounds(
@@ -201,6 +199,7 @@ def plot_recon_comparison(
             )
 
     plt.tight_layout()
+    plt.savefig(f"plots/recon_comparison_tp_{time_idx}.png")
 
 
 def plot_recon(
@@ -253,6 +252,7 @@ def plot_recon(
                 linestyle="--",
             )
         )
+    plt.savefig(f"plots/recon_tp_{time_idx}.png")
 
 
 def interactive_plot(plot_fn, data, tr, start_value=0, **kwargs):

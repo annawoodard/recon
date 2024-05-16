@@ -1,7 +1,9 @@
 import time
+from einops import rearrange
 import torch
 import torch.fft
 import numpy as np
+import pywt
 
 
 def create_2d_gaussian_filter(nx, ny, mu_x, mu_y, sigma_x, sigma_y):
@@ -87,6 +89,73 @@ def apply_gaussian_filter(kspace, gaussian_filters):
     return res
 
 
+def wavelet_kspace_filter(
+    kspace,
+    wavelet="db4",
+    level=1,
+    threshold_func="soft",
+    sigma=None,
+    threshold_factor=1.0,
+):
+    """
+    Apply wavelet-based k-space filtering in PyTorch.
+    Args:
+        kspace (torch.Tensor): The input k-space data of shape (x, y, z, coils, time).
+        wavelet (str): The wavelet family to use for the transform (default: 'db4').
+        level (int): The number of wavelet decomposition levels (default: 1).
+        threshold_func (str): The thresholding function to use ('soft' or 'hard', default: 'soft').
+        sigma (float or None): The noise standard deviation. If None, it will be estimated.
+    Returns:
+        torch.Tensor: The filtered k-space data.
+    """
+
+    def soft_threshold(coeffs, threshold):
+        abs_coeffs = torch.abs(coeffs)
+        return torch.sign(coeffs) * torch.max(
+            abs_coeffs - threshold, torch.zeros_like(abs_coeffs)
+        )
+
+    def hard_threshold(coeffs, threshold):
+        return coeffs * (torch.abs(coeffs) > threshold)
+
+    # Wavelet transform along all spatial dimensions using PyTorch
+    coeffs = pywt.wavedecn(
+        kspace.numpy(), wavelet=wavelet, level=level, mode="periodic"
+    )
+    arr, coeff_slices = coeffs[0], coeffs[1:]
+
+    # Flatten all coefficient arrays contained within the dictionaries
+    flat_coeffs = torch.cat([torch.tensor(c["detail"].flatten()) for c in coeff_slices])
+
+    # Estimate noise standard deviation if not provided
+    if sigma is None:
+        sigma = 1.4826 * torch.median(
+            torch.abs(flat_coeffs - torch.median(flat_coeffs))
+        )
+
+    # Determine the thresholding function
+    if threshold_func == "soft":
+        thresholder = soft_threshold
+    elif threshold_func == "hard":
+        thresholder = hard_threshold
+    else:
+        raise ValueError("Invalid thresholding function. Choose 'soft' or 'hard'.")
+
+    # Apply thresholding
+    threshold = (
+        threshold_factor
+        * sigma
+        * torch.sqrt(2 * torch.log(torch.tensor(arr.size).prod()))
+    )
+    denoised_arr = thresholder(torch.tensor(arr), threshold)
+
+    # Reconstruct the signal using the thresholded coefficients
+    denoised_coeffs = [denoised_arr.numpy()] + coeff_slices
+    filtered_kspace = pywt.waverecn(denoised_coeffs, wavelet=wavelet, mode="periodic")
+
+    return torch.tensor(filtered_kspace, device=kspace.device)
+
+
 def estimate_noise_level(kspace, patch_size):
     """
     Estimate the local noise level in the k-space using a sliding window approach.
@@ -134,5 +203,72 @@ def adaptive_kspace_filter(kspace, patch_size, threshold_factor):
 
     filtered_kspace = kspace.clone()
     filtered_kspace[torch.abs(kspace) < threshold] = 0
+
+    return filtered_kspace
+
+
+def svd_kspace_filter(kspace, rank=None, threshold=None):
+    """
+    Apply SVD-based k-space filtering.
+
+    Args:
+        kspace (torch.Tensor): The input k-space data of shape (x, y, z, coils, time).
+        rank (int or None): The rank of the truncated SVD. If None, no truncation is performed.
+        threshold (float or None): The threshold value for singular value thresholding. If None, no thresholding is performed.
+
+    Returns:
+        torch.Tensor: The filtered k-space data.
+    """
+    # Rearrange the k-space data to a 2D matrix using einops
+    kspace_matrix = rearrange(kspace, "x y z c t -> (c t) (x y z)")
+
+    # Compute the SVD of the real and imaginary parts separately
+    U_real, S_real, Vh_real = torch.linalg.svd(kspace_matrix.real, full_matrices=False)
+    U_imag, S_imag, Vh_imag = torch.linalg.svd(kspace_matrix.imag, full_matrices=False)
+
+    # Truncate the SVD if rank is specified
+    if rank is not None:
+        U_real = U_real[:, :rank]
+        S_real = S_real[:rank]
+        Vh_real = Vh_real[:rank, :]
+        U_imag = U_imag[:, :rank]
+        S_imag = S_imag[:rank]
+        Vh_imag = Vh_imag[:rank, :]
+
+    # Apply singular value thresholding if threshold is specified
+    if threshold is not None:
+        S_real = torch.max(S_real - threshold, torch.zeros_like(S_real))
+        S_imag = torch.max(S_imag - threshold, torch.zeros_like(S_imag))
+
+    # Reconstruct the filtered k-space matrix for real and imaginary parts separately
+    filtered_kspace_real = torch.matmul(
+        U_real, torch.matmul(torch.diag(S_real), Vh_real)
+    )
+    filtered_kspace_imag = torch.matmul(
+        U_imag, torch.matmul(torch.diag(S_imag), Vh_imag)
+    )
+
+    # Rearrange the real and imaginary parts back to the original shape using einops
+    filtered_kspace_real = rearrange(
+        filtered_kspace_real,
+        "(c t) (x y z) -> x y z c t",
+        x=kspace.shape[0],
+        y=kspace.shape[1],
+        z=kspace.shape[2],
+        c=kspace.shape[3],
+        t=kspace.shape[4],
+    )
+    filtered_kspace_imag = rearrange(
+        filtered_kspace_imag,
+        "(c t) (x y z) -> x y z c t",
+        x=kspace.shape[0],
+        y=kspace.shape[1],
+        z=kspace.shape[2],
+        c=kspace.shape[3],
+        t=kspace.shape[4],
+    )
+
+    # Combine the real and imaginary parts to form the filtered complex k-space data
+    filtered_kspace = torch.complex(filtered_kspace_real, filtered_kspace_imag)
 
     return filtered_kspace

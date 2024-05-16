@@ -174,48 +174,66 @@ def get_subtraction_image(image, timepoint, n_subtract=None):
 
 def center_images(fixed_image, moving_image):
     """
-    Align the centers of the fixed and moving images by translating the moving image's center to match the fixed image's center,
-    handling different image sizes.
+    Align the centers of the fixed and moving images by translating the moving image's center to match the fixed image's center.
 
     Parameters:
-    fixed_image (np.ndarray): The fixed image (e.g., SENSE image).
-    moving_image (np.ndarray): The moving image to be aligned (e.g., CE image).
+    fixed_image (np.ndarray): The fixed image.
+    moving_image (np.ndarray): The moving image to be aligned.
 
     Returns:
-    np.ndarray, np.ndarray: The fixed image and the centered moving image.
+    np.ndarray, np.ndarray: The centered moving image.
     """
     # Convert numpy arrays to SimpleITK images
-    fixed_image_sitk = sitk.GetImageFromArray(fixed_image.astype(np.float32))
-    moving_image_sitk = sitk.GetImageFromArray(moving_image.astype(np.float32))
+    fixed_image_sitk = sitk.GetImageFromArray(
+        fixed_image.astype(np.float32), isVector=False
+    )
+    moving_image_sitk = sitk.GetImageFromArray(
+        moving_image.astype(np.float32), isVector=False
+    )
 
-    # Ensure the moving image has the same spacing and size as the fixed image
+    # Set the spacing, origin, and size for the moving image to match the fixed image
     moving_image_sitk.SetSpacing(fixed_image_sitk.GetSpacing())
     moving_image_sitk.SetOrigin(fixed_image_sitk.GetOrigin())
 
-    # Calculate centers of images in index space
-    fixed_size = np.array(fixed_image_sitk.GetSize(), dtype=np.float32)
-    moving_size = np.array(moving_image_sitk.GetSize(), dtype=np.float32)
-    fixed_center = fixed_size / 2.0
-    moving_center = moving_size / 2.0
+    # Calculate centers in physical space
+    fixed_center = np.array(
+        fixed_image_sitk.TransformContinuousIndexToPhysicalPoint(
+            np.array(fixed_image_sitk.GetSize()) / 2.0
+        )
+    )
+    moving_center = np.array(
+        moving_image_sitk.TransformContinuousIndexToPhysicalPoint(
+            np.array(moving_image_sitk.GetSize()) / 2.0
+        )
+    )
+    print("fixed center is:", fixed_center)
+    print("moving center is:", moving_center)
 
-    # Calculate translation needed to align centers
-    translation = fixed_center - moving_center
+    # Calculate the translation needed to align centers
+    translation = np.array(fixed_center) - np.array(moving_center)
+    translation_transform = sitk.TranslationTransform(fixed_image_sitk.GetDimension())
+    translation_transform.SetOffset(translation)
 
-    # Create translation transform
-    transform = sitk.TranslationTransform(fixed_image_sitk.GetDimension())
-    transform.SetOffset(translation)
-
-    # Resample moving image to align it with the fixed image
+    # Use a resampler to align the moving image to the fixed image
     resampler = sitk.ResampleImageFilter()
     resampler.SetReferenceImage(fixed_image_sitk)
     resampler.SetInterpolator(sitk.sitkLinear)
-    resampler.SetTransform(transform)
-    resampler.SetSize(
-        fixed_image_sitk.GetSize()
-    )  # Ensure the output image has the same size as the fixed image
-    centered_moving_image_sitk = resampler.Execute(moving_image_sitk)
+    resampler.SetTransform(translation_transform)
+    resampled_moving_image = resampler.Execute(moving_image_sitk)
+    assert (
+        np.sum(sitk.GetArrayFromImage(moving_image_sitk)) != 0
+    ), "Foo Moving image is empty."
+    assert (
+        np.sum(sitk.GetArrayFromImage(resampled_moving_image)) != 0
+    ), "Resampled moving image is empty."
 
-    return fixed_image, sitk.GetArrayFromImage(centered_moving_image_sitk)
+    # Check for empty image (all zero)
+    if np.all(sitk.GetArrayFromImage(resampled_moving_image) == 0):
+        print(
+            "Warning: The resampled moving image is empty. Check the transformation settings."
+        )
+
+    return fixed_image, sitk.GetArrayFromImage(resampled_moving_image)
 
 
 def process_images(
@@ -247,7 +265,8 @@ def process_images(
     coil_images = np.abs(coil_images)
     sense_image = np.abs(sense_image)
 
-    coil_images = get_subtraction_image(coil_images, timepoint, n_subtract)
+    # coil_images = get_subtraction_image(coil_images, timepoint, n_subtract)
+    coil_images = coil_images[:, :, :, :, timepoint]
     sense_image = get_subtraction_image(sense_image, timepoint, n_subtract)
 
     coil_images = coil_images[:, :, :, ce].numpy()
