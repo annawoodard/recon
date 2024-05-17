@@ -23,56 +23,116 @@ def normalize_image(image):
 
 def register_images(fixed_image, moving_image):
     """
-    Register two images using SimpleITK.
+    Register two images using an affine transformation with initial centering and return the transformation.
 
-    Parameters:
-    fixed_image (np.ndarray): The fixed image (e.g., SENSE image).
-    moving_image (np.ndarray): The moving image to be aligned (e.g., CE image).
+    Args:
+        fixed_image (np.ndarray): The fixed image, typically higher-resolution.
+        moving_image (np.ndarray): The moving image, typically sparse coil image.
 
     Returns:
-    np.ndarray: The registered moving image and the transformation used.
+        np.ndarray: Registered moving image aligned to the fixed image.
+        SimpleITK.Transform: The final affine transformation used for registration.
     """
-    # Ensure both images are 2D and of the same type
-    fixed_image, moving_image = center_images(fixed_image, moving_image)
-    assert np.sum(fixed_image) != 0, "Fixed image is empty."
-    assert np.sum(moving_image) != 0, "Moving image is empty."
+    # Convert numpy arrays to SimpleITK images
+    fixed_image_sitk = sitk.GetImageFromArray(fixed_image, isVector=False)
+    moving_image_sitk = sitk.GetImageFromArray(moving_image, isVector=False)
 
-    fixed_image_sitk = sitk.GetImageFromArray(fixed_image.astype(np.float32))
-    moving_image_sitk = sitk.GetImageFromArray(moving_image.astype(np.float32))
+    # Initialize the transformation to center the images
+    initial_transform = sitk.CenteredTransformInitializer(
+        fixed_image_sitk,
+        moving_image_sitk,
+        sitk.AffineTransform(fixed_image_sitk.GetDimension()),
+        sitk.CenteredTransformInitializerFilter.GEOMETRY,
+    )
 
-    # Ensure both images have the same number of dimensions
-    assert (
-        fixed_image_sitk.GetDimension() == moving_image_sitk.GetDimension()
-    ), "Fixed and moving images must have the same number of dimensions."
-
-    # Initialize registration method
+    # Set up the registration framework
     registration_method = sitk.ImageRegistrationMethod()
     registration_method.SetMetricAsMattesMutualInformation(numberOfHistogramBins=50)
-    registration_method.SetOptimizerAsGradientDescent(
-        learningRate=1.0, numberOfIterations=200
-    )
+    registration_method.SetMetricSamplingStrategy(registration_method.RANDOM)
+    registration_method.SetMetricSamplingPercentage(0.1)
 
-    # Set initial transform
-    initial_transform = sitk.CenteredTransformInitializer(
-        fixed_image_sitk, moving_image_sitk, sitk.Euler2DTransform()
+    registration_method.SetInterpolator(sitk.sitkLinear)
+    registration_method.SetOptimizerAsGradientDescent(
+        learningRate=1.0,
+        numberOfIterations=100,
+        convergenceMinimumValue=1e-6,
+        convergenceWindowSize=10,
     )
+    registration_method.SetOptimizerScalesFromPhysicalShift()
+
+    # Use the affine transform
     registration_method.SetInitialTransform(initial_transform, inPlace=False)
 
-    # Execute registration
+    # Perform the registration
     final_transform = registration_method.Execute(
         sitk.Cast(fixed_image_sitk, sitk.sitkFloat32),
         sitk.Cast(moving_image_sitk, sitk.sitkFloat32),
     )
-    moving_resampled = sitk.Resample(
-        moving_image_sitk,
-        fixed_image_sitk,
-        final_transform,
-        sitk.sitkLinear,
-        0.0,
-        moving_image_sitk.GetPixelID(),
-    )
 
-    return sitk.GetArrayFromImage(moving_resampled), final_transform
+    # Apply the final transformation to align the images
+    resampler = sitk.ResampleImageFilter()
+    resampler.SetReferenceImage(fixed_image_sitk)
+    resampler.SetInterpolator(sitk.sitkLinear)
+    resampler.SetDefaultPixelValue(100)
+    resampler.SetTransform(final_transform)
+
+    resampled_moving_image = resampler.Execute(moving_image_sitk)
+
+    return sitk.GetArrayFromImage(resampled_moving_image), final_transform
+
+
+# def register_images(fixed_image, moving_image):
+#     """
+#     Register two images using SimpleITK.
+
+#     Parameters:
+#     fixed_image (np.ndarray): The fixed image (e.g., SENSE image).
+#     moving_image (np.ndarray): The moving image to be aligned (e.g., CE image).
+
+#     Returns:
+#     np.ndarray: The registered moving image and the transformation used.
+#     """
+#     # Ensure both images are 2D and of the same type
+#     fixed_image, moving_image = center_images(fixed_image, moving_image)
+#     assert np.sum(fixed_image) != 0, "Fixed image is empty."
+#     assert np.sum(moving_image) != 0, "Moving image is empty."
+
+#     fixed_image_sitk = sitk.GetImageFromArray(fixed_image.astype(np.float32))
+#     moving_image_sitk = sitk.GetImageFromArray(moving_image.astype(np.float32))
+
+#     # Ensure both images have the same number of dimensions
+#     assert (
+#         fixed_image_sitk.GetDimension() == moving_image_sitk.GetDimension()
+#     ), "Fixed and moving images must have the same number of dimensions."
+
+#     # Initialize registration method
+#     registration_method = sitk.ImageRegistrationMethod()
+#     registration_method.SetMetricAsMattesMutualInformation(numberOfHistogramBins=50)
+#     registration_method.SetOptimizerAsGradientDescent(
+#         learningRate=1.0, numberOfIterations=200
+#     )
+
+#     # Set initial transform
+#     initial_transform = sitk.CenteredTransformInitializer(
+#         fixed_image_sitk, moving_image_sitk, sitk.Euler2DTransform()
+#     )
+#     registration_method.SetInitialTransform(initial_transform, inPlace=False)
+
+#     # Execute registration
+#     final_transform = registration_method.Execute(
+#         sitk.Cast(fixed_image_sitk, sitk.sitkFloat32),
+#         sitk.Cast(moving_image_sitk, sitk.sitkFloat32),
+#     )
+#     moving_resampled = sitk.Resample(
+#         moving_image_sitk,
+#         fixed_image_sitk,
+#         final_transform,
+#         sitk.sitkLinear,
+#         0.0,
+#         moving_image_sitk.GetPixelID(),
+#     )
+
+#     return sitk.GetArrayFromImage(moving_resampled), final_transform
 
 
 def apply_transform(image, transform):
@@ -174,66 +234,38 @@ def get_subtraction_image(image, timepoint, n_subtract=None):
 
 def center_images(fixed_image, moving_image):
     """
-    Align the centers of the fixed and moving images by translating the moving image's center to match the fixed image's center.
+    Align the centers of the fixed and moving images by padding the moving image's center to match the fixed image's center.
 
     Parameters:
     fixed_image (np.ndarray): The fixed image.
     moving_image (np.ndarray): The moving image to be aligned.
 
     Returns:
-    np.ndarray, np.ndarray: The centered moving image.
+    np.ndarray, np.ndarray: The fixed image, and the centered moving image.
     """
-    # Convert numpy arrays to SimpleITK images
-    fixed_image_sitk = sitk.GetImageFromArray(
-        fixed_image.astype(np.float32), isVector=False
-    )
-    moving_image_sitk = sitk.GetImageFromArray(
-        moving_image.astype(np.float32), isVector=False
+    fixed_shape = np.array(fixed_image.shape)
+    moving_shape = np.array(moving_image.shape)
+
+    # Calculate the padding needed to center the moving image
+    padding = (fixed_shape - moving_shape) // 2
+    pad_width = [
+        (max(p, 0), max(p, 0)) for p in padding
+    ]  # Ensure non-negative padding widths
+
+    # Apply zero padding to the moving image
+    centered_moving_image = np.pad(
+        moving_image, pad_width, mode="constant", constant_values=0
     )
 
-    # Set the spacing, origin, and size for the moving image to match the fixed image
-    moving_image_sitk.SetSpacing(fixed_image_sitk.GetSpacing())
-    moving_image_sitk.SetOrigin(fixed_image_sitk.GetOrigin())
-
-    # Calculate centers in physical space
-    fixed_center = np.array(
-        fixed_image_sitk.TransformContinuousIndexToPhysicalPoint(
-            np.array(fixed_image_sitk.GetSize()) / 2.0
+    # Trim any excess if the moving image is larger than the fixed image
+    if np.any(padding < 0):
+        slices = tuple(
+            slice(-p if p < 0 else None, d + p if p < 0 else None)
+            for p, d in zip(padding, moving_shape)
         )
-    )
-    moving_center = np.array(
-        moving_image_sitk.TransformContinuousIndexToPhysicalPoint(
-            np.array(moving_image_sitk.GetSize()) / 2.0
-        )
-    )
-    print("fixed center is:", fixed_center)
-    print("moving center is:", moving_center)
+        centered_moving_image = centered_moving_image[slices]
 
-    # Calculate the translation needed to align centers
-    translation = np.array(fixed_center) - np.array(moving_center)
-    translation_transform = sitk.TranslationTransform(fixed_image_sitk.GetDimension())
-    translation_transform.SetOffset(translation)
-
-    # Use a resampler to align the moving image to the fixed image
-    resampler = sitk.ResampleImageFilter()
-    resampler.SetReferenceImage(fixed_image_sitk)
-    resampler.SetInterpolator(sitk.sitkLinear)
-    resampler.SetTransform(translation_transform)
-    resampled_moving_image = resampler.Execute(moving_image_sitk)
-    assert (
-        np.sum(sitk.GetArrayFromImage(moving_image_sitk)) != 0
-    ), "Foo Moving image is empty."
-    assert (
-        np.sum(sitk.GetArrayFromImage(resampled_moving_image)) != 0
-    ), "Resampled moving image is empty."
-
-    # Check for empty image (all zero)
-    if np.all(sitk.GetArrayFromImage(resampled_moving_image) == 0):
-        print(
-            "Warning: The resampled moving image is empty. Check the transformation settings."
-        )
-
-    return fixed_image, sitk.GetArrayFromImage(resampled_moving_image)
+    return fixed_image, centered_moving_image
 
 
 def process_images(
@@ -241,10 +273,14 @@ def process_images(
     sense_image,
     ce,
     timepoint,
+    coil_rois,
+    sense_rois,
+    noise_roi,
     threshold=150,
     coil_window=None,
     recon_window=None,
     n_subtract=None,
+    output_dir=None,
 ):
     """
     Complete pipeline to process images, perform registration, feature detection, ROI extraction, and SNR calculation.
@@ -278,51 +314,45 @@ def process_images(
     coil_images = normalize_image(coil_images)
     sense_image = normalize_image(sense_image)
 
-    registered_image, transform = register_images(sense_image, coil_images)
+    # registered_image, transform = register_images(sense_image, coil_images)
 
-    # Detect and extract ROIs in the registered image
-    enhancing_features = detect_enhancing_features(registered_image, threshold)
-    rois = extract_rois(registered_image, enhancing_features)
+    # enhancing_features = detect_enhancing_features(coil_images, threshold)
+    # coil_rois = extract_rois(coil_images, enhancing_features)
 
-    # Apply the same transformation to the CE image to get corresponding ROIs
-    ce_transformed_image = apply_transform(coil_images, transform)
-
-    # Plot ROIs in both SENSE and CE images
-    # plot_rois(
-    #     sense_image,
-    #     coil_images,
-    #     [],
-    #     [],
-    #     "Registered ROIs in SENSE and CE Images",
-    # )
+    # enhancing_features = detect_enhancing_features(sense_image, threshold)
+    # sense_rois = extract_rois(sense_image, enhancing_features)
     plot_rois(
         sense_image,
-        ce_transformed_image,
-        rois,
-        rois,
-        "Registered ROIs in SENSE and CE Images",
+        coil_images,
+        sense_rois + noise_roi,
+        coil_rois + noise_roi,
     )
 
-    # Flatten and calculate SNR for corresponding ROIs
     sense_roi_values = [
-        sense_image[y : y + h, x : x + w].flatten() for x, y, w, h in rois
+        sense_image[y : y + h, x : x + w].flatten() for x, y, w, h in sense_rois
     ]
-    ce_roi_values = [
-        ce_transformed_image[y : y + h, x : x + w].flatten() for x, y, w, h in rois
+    coil_roi_values = [
+        coil_images[y : y + h, x : x + w].flatten() for x, y, w, h in coil_rois
     ]
+    x, y, w, h = noise_roi[0]
+    sense_noise_values = sense_image[y : y + h, x : x + w].flatten()
+    coil_noise_values = coil_images[y : y + h, x : x + w].flatten()
 
     sense_signal_roi_tensor = torch.tensor(np.concatenate(sense_roi_values))
-    ce_signal_roi_tensor = torch.tensor(np.concatenate(ce_roi_values))
-    noise_roi_tensor = torch.tensor(registered_image.flatten())
+    coil_signal_roi_tensor = torch.tensor(np.concatenate(coil_roi_values))
+    sense_noise_roi_tensor = torch.tensor(sense_noise_values)
+    coil_noise_roi_tensor = torch.tensor(coil_noise_values)
 
-    sense_snr = calculate_snr(sense_signal_roi_tensor, noise_roi_tensor)
-    ce_snr = calculate_snr(ce_signal_roi_tensor, noise_roi_tensor)
+    sense_snr = calculate_snr(sense_signal_roi_tensor, sense_noise_roi_tensor)
+    coil_snr = calculate_snr(coil_signal_roi_tensor, coil_noise_roi_tensor)
 
-    print(f"SNR for SENSE image: {sense_snr}")
-    print(f"SNR for CE image: {ce_snr}")
+    print(f"SNR for SENSE image: {sense_snr:.1f}")
+    print(f"SNR for CE image: {coil_snr:.1f}")
 
-    plot_histograms(sense_signal_roi_tensor, noise_roi_tensor, "SENSE image ROIs")
-    plot_histograms(ce_signal_roi_tensor, noise_roi_tensor, "CE image ROIs")
+    plot_histograms(
+        sense_signal_roi_tensor, sense_noise_roi_tensor, "SENSE", output_dir
+    )
+    plot_histograms(coil_signal_roi_tensor, coil_noise_roi_tensor, "CE", output_dir)
 
 
 def calculate_snr(signal_roi, noise_roi):

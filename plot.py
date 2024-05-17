@@ -278,18 +278,19 @@ def interactive_plot(plot_fn, data, tr, start_value=0, **kwargs):
     display(interactive_control)
 
 
-def plot_histograms(signal_roi, noise_roi, title):
+def plot_histograms(signal_roi, noise_roi, title, out_dir):
     plt.figure(figsize=(10, 5))
     plt.hist(signal_roi.numpy(), bins=30, alpha=0.7, label="signal")
-    plt.hist(noise_roi.numpy(), bins=30, alpha=0.7, label="noise")
-    plt.title(title)
+    # plt.hist(noise_roi.numpy(), bins=30, alpha=0.7, label="noise")
+    plt.title(f"{title} image ROI")
     plt.xlabel("intensity")
     plt.ylabel("frequency")
     plt.yscale("log")
-    plt.legend()
+    # plt.legend()
+    plt.savefig(f"plots/snr_histos_{title}.png")
 
 
-def plot_rois(sense_img, ce_img, sense_rois, ce_rois, title):
+def plot_rois(sense_img, ce_img, sense_rois, ce_rois, title=None):
     """
     Plot the ROIs on the SENSE image and CE image side by side.
 
@@ -300,26 +301,34 @@ def plot_rois(sense_img, ce_img, sense_rois, ce_rois, title):
     ce_rois (list): List of ROIs in the CE image.
     title (str): Title for the plot.
     """
-    # Normalize images for display
     sense_img_norm = (sense_img - np.min(sense_img)) / (
         np.max(sense_img) - np.min(sense_img)
     )
     ce_img_norm = (ce_img - np.min(ce_img)) / (np.max(ce_img) - np.min(ce_img))
 
-    fig, axes = plt.subplots(1, 2, figsize=(15, 7))
+    fig, axes = plt.subplots(1, 2, figsize=(8, 1.5))
 
     # Plot SENSE image with ROIs
     sense_img_with_rois = (sense_img_norm * 255).astype(np.uint8)
     for x, y, w, h in sense_rois:
         cv2.rectangle(sense_img_with_rois, (x, y), (x + w, y + h), (255, 0, 0), 2)
-    axes[0].imshow(sense_img_with_rois, cmap="gray")
-    axes[0].set_title("SENSE Image with ROIs")
+    axes[0].imshow(
+        sense_img_with_rois,
+        cmap="gray",
+        interpolation="none",
+    )
+    axes[0].set_title("SENSE Image with ROI")
 
     # Plot CE image with ROIs
     ce_img_with_rois = (ce_img_norm * 255).astype(np.uint8)
     for x, y, w, h in ce_rois:
         cv2.rectangle(ce_img_with_rois, (x, y), (x + w, y + h), (255, 0, 0), 2)
-    axes[1].imshow(ce_img_with_rois, cmap="gray")
-    axes[1].set_title("CE Image with ROIs")
+    axes[1].imshow(
+        ce_img_with_rois,
+        cmap="gray",
+        interpolation="none",
+    )
+    axes[1].set_title("CE Image with ROI")
 
-    plt.suptitle(title)
+    if title is not None:
+        plt.suptitle(title)
